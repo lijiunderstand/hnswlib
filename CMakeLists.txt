@@ -1,4 +1,4 @@
-cmake_minimum_required (VERSION 2.6)
+cmake_minimum_required (VERSION 3.5)
 project(hnsw_lib
     LANGUAGES CXX)
 
@@ -24,4 +24,22 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
 
     add_executable(main main.cpp sift_1b.cpp)
     target_link_libraries(main hnswlib)
+
+    add_executable(sift_1M_L2 sift_1M_L2.cpp)
+    target_link_libraries(sift_1M_L2 hnswlib)
+
+    add_executable(sift_1M_IP sift_1M_IP.cpp)
+    target_link_libraries(sift_1M_IP hnswlib)
+    add_executable(sift_1M_IP_normalize sift_1M_IP_normalize.cpp)
+    target_link_libraries(sift_1M_IP_normalize hnswlib)
+   
+    add_executable(sift1M_demo sift1M_demo.cpp)
+    target_link_libraries(sift1M_demo hnswlib)
+
+    add_executable(sift1B_demo sift1B_demo.cpp)
+    target_link_libraries(sift1B_demo hnswlib)
+    
+    add_executable(siftsmall siftsmall.cpp)
+    target_link_libraries(siftsmall hnswlib)
+
 endif()

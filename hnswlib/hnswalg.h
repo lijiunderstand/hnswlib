@@ -8,6 +8,7 @@
 #include <assert.h>
 #include <unordered_set>
 #include <list>
+#include <iostream>
 
 namespace hnswlib {
     typedef unsigned int tableint;
@@ -32,22 +33,22 @@ namespace hnswlib {
             data_size_ = s->get_data_size();
             fstdistfunc_ = s->get_dist_func();
             dist_func_param_ = s->get_dist_func_param();
-            M_ = M;
+            M_ = M; //每个（非0层）节点可以有多少个邻居
             maxM_ = M_;
-            maxM0_ = M_ * 2;
+            maxM0_ = M_ * 2; //第0层节点可以有多少个邻居 
             ef_construction_ = std::max(ef_construction,M_);
             ef_ = 10;
 
             level_generator_.seed(random_seed);
             update_probability_generator_.seed(random_seed + 1);
 
-            size_links_level0_ = maxM0_ * sizeof(tableint) + sizeof(linklistsizeint);
-            size_data_per_element_ = size_links_level0_ + data_size_ + sizeof(labeltype);
+            size_links_level0_ = maxM0_ * sizeof(tableint) + sizeof(linklistsizeint); //邻居域（每个向量在第0层的近邻向量id）
+            size_data_per_element_ = size_links_level0_ + data_size_ + sizeof(labeltype); //向量数据域（原始向量， data_size_），label(向量的业务id),邻居域（每个向量在第0层的近邻向量id）
             offsetData_ = size_links_level0_;
             label_offset_ = size_links_level0_ + data_size_;
             offsetLevel0_ = 0;
 
-            data_level0_memory_ = (char *) malloc(max_elements_ * size_data_per_element_);
+            data_level0_memory_ = (char *) malloc(max_elements_ * size_data_per_element_); //0层全部数据保存在data_level0_memory_,构造索引时通过参数max_elements指定索引最大向量个数。
             if (data_level0_memory_ == nullptr)
                 throw std::runtime_error("Not enough memory");
 
@@ -59,11 +60,11 @@ namespace hnswlib {
             enterpoint_node_ = -1;
             maxlevel_ = -1;
 
-            linkLists_ = (char **) malloc(sizeof(void *) * max_elements_);
+            linkLists_ = (char **) malloc(sizeof(void *) * max_elements_);//二维数组，每一行代表一个节点从第一层到maxlevel层每一层的邻居关系。每个节点每一层的数据结构主要包括：邻居的数量（size),保留的两个字节，以及该层的邻居的id.
             if (linkLists_ == nullptr)
                 throw std::runtime_error("Not enough memory: HierarchicalNSW failed to allocate linklists");
-            size_links_per_element_ = maxM_ * sizeof(tableint) + sizeof(linklistsizeint);
-            mult_ = 1 / log(1.0 * M_);
+            size_links_per_element_ = maxM_ * sizeof(tableint) + sizeof(linklistsizeint); //每个节点对应邻居跳表，在每一层需要占的空间
+            mult_ = 1 / log(1.0 * M_); //用于计算新增向量落在哪一层
             revSize_ = 1.0 / mult_;
         }
 
@@ -81,14 +82,14 @@ namespace hnswlib {
                 if (element_levels_[i] > 0)
                     free(linkLists_[i]);
             }
-            free(linkLists_);
+            free(linkLists_); //节点邻居跳表，char**
             delete visited_list_pool_;
         }
 
         size_t max_elements_;
         size_t cur_element_count;
-        size_t size_data_per_element_;
-        size_t size_links_per_element_;
+        size_t size_data_per_element_;//第0层节点表中，需要占多少字节=size_links_level0_ +data_size_ +8
+        size_t size_links_per_element_;//每个节点对应邻居跳表，在每一层需要占的空间
         size_t num_deleted_;
 
         size_t M_;
@@ -101,20 +102,20 @@ namespace hnswlib {
 
 
         VisitedListPool *visited_list_pool_;
-        std::mutex cur_element_count_guard_;
+        std::mutex cur_element_count_guard_; //增员减员锁
 
-        std::vector<std::mutex> link_list_locks_;
+        std::vector<std::mutex> link_list_locks_;//节点邻居表锁，每个节点一个
 
         // Locks to prevent race condition during update/insert of an element at same time.
         // Note: Locks for additions can also be used to prevent this race condition if the querying of KNN is not exposed along with update/inserts i.e multithread insert/update/query in parallel.
-        std::vector<std::mutex> link_list_update_locks_;
-        tableint enterpoint_node_;
+        std::vector<std::mutex> link_list_update_locks_;//更新占坑锁，它限定了增量的速度。个数由下面的max_update_element_locks决定。
+        tableint enterpoint_node_;//随机进度点的内部id, 初始为-1
 
-        size_t size_links_level0_;
+        size_t size_links_level0_;//第0层节点的邻居表，需要占多少字节
         size_t offsetData_, offsetLevel0_;
 
         char *data_level0_memory_;
-        char **linkLists_;
+        char **linkLists_; //节点邻居跳表，char*,每个节点对应数据依然是连续数组
         std::vector<int> element_levels_;
 
         size_t data_size_;
@@ -124,24 +125,24 @@ namespace hnswlib {
         void *dist_func_param_;
         std::unordered_map<labeltype, tableint> label_lookup_;
 
-        std::default_random_engine level_generator_;
-        std::default_random_engine update_probability_generator_;
+        std::default_random_engine level_generator_; //随机数发生器，决定新增的向量在哪一层
+        std::default_random_engine update_probability_generator_;//随机数发生器，增量更新时，概率的让邻居节点更新邻居，实际上不生效。
 
-        inline labeltype getExternalLabel(tableint internal_id) const {
+        inline labeltype getExternalLabel(tableint internal_id) const { //求对外的 index(这边管内部叫idx,外部叫label)
             labeltype return_label;
             memcpy(&return_label,(data_level0_memory_ + internal_id * size_data_per_element_ + label_offset_), sizeof(labeltype));
             return return_label;
         }
 
-        inline void setExternalLabel(tableint internal_id, labeltype label) const {
+        inline void setExternalLabel(tableint internal_id, labeltype label) const {//设置外部label的值，用memcpy实现，就是将label的值写到前面的内存里面去
             memcpy((data_level0_memory_ + internal_id * size_data_per_element_ + label_offset_), &label, sizeof(labeltype));
         }
 
-        inline labeltype *getExternalLabeLp(tableint internal_id) const {
+        inline labeltype *getExternalLabeLp(tableint internal_id) const {//获取外部的label的指针
             return (labeltype *) (data_level0_memory_ + internal_id * size_data_per_element_ + label_offset_);
         }
 
-        inline char *getDataByInternalId(tableint internal_id) const {
+        inline char *getDataByInternalId(tableint internal_id) const {//通过内部的index值获取data
             return (data_level0_memory_ + internal_id * size_data_per_element_ + offsetData_);
         }
 
@@ -153,7 +154,7 @@ namespace hnswlib {
 
 
         std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst>
-        searchBaseLayer(tableint ep_id, const void *data_point, int layer) {
+        searchBaseLayer(tableint ep_id, const void *data_point, int layer) {//在某一层search，参数需要直到是哪层，enter_point, data_point是query的向量
             VisitedList *vl = visited_list_pool_->getFreeVisitedList();
             vl_type *visited_array = vl->mass;
             vl_type visited_array_tag = vl->curV;
@@ -161,9 +162,9 @@ namespace hnswlib {
             std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates;
             std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> candidateSet;
 
-            dist_t lowerBound;
+            dist_t lowerBound;//存储W中距离Q的最远距离
             if (!isMarkedDeleted(ep_id)) {
-                dist_t dist = fstdistfunc_(data_point, getDataByInternalId(ep_id), dist_func_param_);
+                dist_t dist = fstdistfunc_(data_point, getDataByInternalId(ep_id), dist_func_param_);//先从enter_point开始计算，计算dist，然后放入结果中
                 top_candidates.emplace(dist, ep_id);
                 lowerBound = dist;
                 candidateSet.emplace(-dist, ep_id);
@@ -175,12 +176,12 @@ namespace hnswlib {
 
             while (!candidateSet.empty()) {
                 std::pair<dist_t, tableint> curr_el_pair = candidateSet.top();
-                if ((-curr_el_pair.first) > lowerBound && top_candidates.size() == ef_construction_) {
+                if ((-curr_el_pair.first) > lowerBound && top_candidates.size() == ef_construction_) {//top_candidates，存结果达到上限了
                     break;
                 }
-                candidateSet.pop();
+                candidateSet.pop();//要扩充邻居了
 
-                tableint curNodeNum = curr_el_pair.second;
+                tableint curNodeNum = curr_el_pair.second;//获取node idx
 
                 std::unique_lock <std::mutex> lock(link_list_locks_[curNodeNum]);
 
@@ -191,16 +192,16 @@ namespace hnswlib {
                     data = (int*)get_linklist(curNodeNum, layer);
 //                    data = (int *) (linkLists_[curNodeNum] + (layer - 1) * size_links_per_element_);
                 }
-                size_t size = getListCount((linklistsizeint*)data);
-                tableint *datal = (tableint *) (data + 1);
+                size_t size = getListCount((linklistsizeint*)data);//邻居的数量
+                tableint *datal = (tableint *) (data + 1); //前面是L, 后面是一，取出第一个邻居
 #ifdef USE_SSE
-                _mm_prefetch((char *) (visited_array + *(data + 1)), _MM_HINT_T0);
+                _mm_prefetch((char *) (visited_array + *(data + 1)), _MM_HINT_T0);//SSE使用_mm_prefetch加速计算，可以在实际当前运算与数据从内存到cache的加载并行，从而达到加速的目的
                 _mm_prefetch((char *) (visited_array + *(data + 1) + 64), _MM_HINT_T0);
                 _mm_prefetch(getDataByInternalId(*datal), _MM_HINT_T0);
                 _mm_prefetch(getDataByInternalId(*(datal + 1)), _MM_HINT_T0);
 #endif
 
-                for (size_t j = 0; j < size; j++) {
+                for (size_t j = 0; j < size; j++) {//遍历所有的邻居
                     tableint candidate_id = *(datal + j);
 //                    if (candidate_id == 0) continue;
 #ifdef USE_SSE
@@ -211,7 +212,7 @@ namespace hnswlib {
                     visited_array[candidate_id] = visited_array_tag;
                     char *currObj1 = (getDataByInternalId(candidate_id));
 
-                    dist_t dist1 = fstdistfunc_(data_point, currObj1, dist_func_param_);
+                    dist_t dist1 = fstdistfunc_(data_point, currObj1, dist_func_param_);//计算邻居和query的距离
                     if (top_candidates.size() < ef_construction_ || lowerBound > dist1) {
                         candidateSet.emplace(-dist1, candidate_id);
 #ifdef USE_SSE
@@ -388,12 +389,12 @@ namespace hnswlib {
                                        std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> &top_candidates,
         int level, bool isUpdate) {
             size_t Mcurmax = level ? maxM_ : maxM0_;
-            getNeighborsByHeuristic2(top_candidates, M_);
+            getNeighborsByHeuristic2(top_candidates, M_); //启发式算法获取top_candidates
             if (top_candidates.size() > M_)
                 throw std::runtime_error("Should be not be more than M_ candidates returned by the heuristic");
 
             std::vector<tableint> selectedNeighbors;
-            selectedNeighbors.reserve(M_);
+            selectedNeighbors.reserve(M_); //选M_个邻居
             while (top_candidates.size() > 0) {
                 selectedNeighbors.push_back(top_candidates.top().second);
                 top_candidates.pop();
@@ -605,6 +606,39 @@ namespace hnswlib {
             writeBinaryPOD(output, ef_construction_);
 
             output.write(data_level0_memory_, cur_element_count * size_data_per_element_);
+            //print(linkLists)
+            std::ofstream dataFile;
+            dataFile.open("./linkLists.txt", std::ios::app);
+            if(!dataFile.is_open()){
+                std::cout<<"file open failed"<<std::endl;
+                return;
+            }
+            for (size_t i = 0; i < cur_element_count; i++) {
+                unsigned int linkListSize = element_levels_[i] > 0 ? size_links_per_element_ * element_levels_[i] : 0;
+                // writeBinaryPOD(output, linkListSize);
+                // if (linkListSize)
+                //     output.write(linkLists_[i], linkListSize);
+                dataFile << "cue_element_count: "<<i <<std::endl;
+                dataFile << linkListSize<<std::endl;
+            }
+
+            //print degree of each node in level 0
+            std::ofstream dataFile_level0;
+            dataFile_level0.open("./linkLists_level0.txt", std::ios::app);
+            if(!dataFile_level0.is_open()){
+                std::cout<<"file open failed"<<std::endl;
+                return;
+            }
+            for (size_t i = 0; i < cur_element_count; i++) {
+                // linklistsizeint* linkListSize = get_linklist0(cur_element_count);
+                // int size = getListCount(linkListSize);
+
+                int *data = (int *) get_linklist0(i);
+                size_t size = getListCount((linklistsizeint*)data);
+
+                dataFile_level0 << "cue_element_count: "<<i <<std::endl;
+                dataFile_level0 << size<<std::endl;
+            }
 
             for (size_t i = 0; i < cur_element_count; i++) {
                 unsigned int linkListSize = element_levels_[i] > 0 ? size_links_per_element_ * element_levels_[i] : 0;
@@ -648,8 +682,8 @@ namespace hnswlib {
 
 
             data_size_ = s->get_data_size();
-            fstdistfunc_ = s->get_dist_func();
-            dist_func_param_ = s->get_dist_func_param();
+            fstdistfunc_ = s->get_dist_func(); //距离计算
+            dist_func_param_ = s->get_dist_func_param();  //get dim
 
             auto pos=input.tellg();
 
@@ -834,7 +868,12 @@ namespace hnswlib {
         void addPoint(const void *data_point, labeltype label) {
             addPoint(data_point, label,-1);
         }
-
+       
+        /*
+        更新节点， 这个与添加节点类似：
+	    1. 从当前图的从最高层逐层往下寻找直至节点的层数+1停止，寻找到离data_point最近的节点，作为下面一层寻找的起始点。
+	    2. 从data_point的最高层依次开始往下，每一层寻找离data_point最接近的ef_construction_（构建HNSW是可指定）个节点构成候选集，再从候选集中利用启发式搜索选择M个节点与data_point相互连接.
+        */
         void updatePoint(const void *dataPoint, tableint internalId, float updateNeighborProbability) {
             // update the feature vector associated with existing point with new vector
             memcpy(getDataByInternalId(internalId), dataPoint, data_size_);
@@ -847,6 +886,11 @@ namespace hnswlib {
 
             int elemLevel = element_levels_[internalId];
             std::uniform_real_distribution<float> distribution(0.0, 1.0);
+
+
+            //从第0层逐层往上，直至该节点的最高层，在每一层取待更新节点的部分邻居，更新他们的邻居。
+            //for循环遍历每一层，在for循环里面，首先挑部分原来的邻居，存储在 sNeigh里面， 比例由参数updateNeighborProbability控制。
+            //而将待更新节点经过一跳，二跳到达的节点存在sCand里面，供后面更新邻居的时候选择。
             for (int layer = 0; layer <= elemLevel; layer++) {
                 std::unordered_set<tableint> sCand;
                 std::unordered_set<tableint> sNeigh;
@@ -869,7 +913,7 @@ namespace hnswlib {
                         sCand.insert(elTwoHop);
                     }
                 }
-
+                //然后，对sNeigh中每一个选中的待更新的邻居n，利用启发式搜索(getNeighborsByHeuristic2)在sCand中选出最多M个点，将它们作为n的邻居存储在n的数据结构对应的位置。
                 for (auto&& neigh : sNeigh) {
                     // if (neigh == internalId)
                     //     continue;
@@ -893,6 +937,7 @@ namespace hnswlib {
                     }
 
                     // Retrieve neighbours using heuristic and set connections.
+                    // 对于sNeigh中的每一个选中的待更新的邻居n,利用启发式搜索在sCand中选出最多M个点
                     getNeighborsByHeuristic2(candidates, layer == 0 ? maxM0_ : maxM_);
 
                     {
@@ -909,7 +954,8 @@ namespace hnswlib {
                     }
                 }
             }
-
+           //第三步，更新待更新节点data_point的邻居。这个与添加节点类似：从当前图的从最高层逐层往下寻找直至节点的层数+1停止，寻找到离data_point最近的节点，作为下面一层寻找的起始点。
+           //2）从data_point的最高层依次开始往下，每一层寻找离data_point最接近的ef_construction_（构建HNSW是可指定）个节点构成候选集，再从候选集中利用启发式搜索选择M个节点与data_point相互连接.
             repairConnectionsForUpdate(dataPoint, entryPointCopy, internalId, elemLevel, maxLevelCopy);
         };
 
@@ -988,7 +1034,7 @@ namespace hnswlib {
         tableint addPoint(const void *data_point, labeltype label, int level) {
 
             tableint cur_c = 0;
-            {
+            {   //添加节点时，先检查一下该节点的label是否已经存在了，如果存在的话，直接更新节点
                 // Checking if the element with the same label already exists
                 // if so, updating it *instead* of creating a new element.
                 std::unique_lock <std::mutex> templock_curr(cur_element_count_guard_);
@@ -997,12 +1043,12 @@ namespace hnswlib {
                     tableint existingInternalId = search->second;
                     templock_curr.unlock();
 
-                    std::unique_lock <std::mutex> lock_el_update(link_list_update_locks_[(existingInternalId & (max_update_element_locks - 1))]);
+                    std::unique_lock <std::mutex> lock_el_update(link_list_update_locks_[(existingInternalId & (max_update_element_locks - 1))]);//锁，控制节点更新
 
                     if (isMarkedDeleted(existingInternalId)) {
                         unmarkDeletedInternal(existingInternalId);
                     }
-                    updatePoint(data_point, existingInternalId, 1.0);
+                    updatePoint(data_point, existingInternalId, 1.0);//更新节点
                     
                     return existingInternalId;
                 }
@@ -1010,16 +1056,16 @@ namespace hnswlib {
                 if (cur_element_count >= max_elements_) {
                     throw std::runtime_error("The number of elements exceeds the specified limit");
                 };
-
+               //如果图中不存在这个节点，首先确定该节点的index也就是cur_c
                 cur_c = cur_element_count;
-                cur_element_count++;
+                cur_element_count++;  //节点id自增加1
                 label_lookup_[label] = cur_c;
             }
 
             // Take update lock to prevent race conditions on an element with insertion/update at the same time.
             std::unique_lock <std::mutex> lock_el_update(link_list_update_locks_[(cur_c & (max_update_element_locks - 1))]);
             std::unique_lock <std::mutex> lock_el(link_list_locks_[cur_c]);
-            int curlevel = getRandomLevel(mult_);
+            int curlevel = getRandomLevel(mult_); //随机初始化层数 curlevel, 确定插入点所在的层数，从这层开始，到底层，这个点都需要出现。
             if (level > 0)
                 curlevel = level;
 
@@ -1033,28 +1079,30 @@ namespace hnswlib {
             tableint currObj = enterpoint_node_;
             tableint enterpoint_copy = enterpoint_node_;
 
-
+            //初始化节点相关数据结构，主要包括：将节点数据以及label拷贝到第0层数据结构(data_level0_memory_)中；为该节点分配存储0层以上的邻居关系的结构，并将其地址存储在linkLists_中
             memset(data_level0_memory_ + cur_c * size_data_per_element_ + offsetLevel0_, 0, size_data_per_element_);
 
             // Initialisation of the data and label
-            memcpy(getExternalLabeLp(cur_c), &label, sizeof(labeltype));
-            memcpy(getDataByInternalId(cur_c), data_point, data_size_);
+            memcpy(getExternalLabeLp(cur_c), &label, sizeof(labeltype));//getExternalLabeLp是计算这个cur_c这个节点的label所在的内存， 然后给他初始化
+            memcpy(getDataByInternalId(cur_c), data_point, data_size_);//getDataByInternalId是计算这个cur_c这个节点的data所在的内存，然后给他初始化
 
-
+            //为该节点分配存储0层以上的邻居关系的结构，并将其地址存储在linkLists_中
             if (curlevel) {
                 linkLists_[cur_c] = (char *) malloc(size_links_per_element_ * curlevel + 1);
                 if (linkLists_[cur_c] == nullptr)
                     throw std::runtime_error("Not enough memory: addPoint failed to allocate linklist");
                 memset(linkLists_[cur_c], 0, size_links_per_element_ * curlevel + 1);
             }
-
+            //待添加的节点不是第一个元素
+            //1）那么从当前图的从最高层逐层往下寻找直至节点的层数+1停止，寻找到离data_point最近的节点，作为下面一层寻找的起始点。
+            //2）从curlevel依次开始往下，每一层寻找离data_point最接近的ef_construction_（构建HNSW是可指定）个节点构成候选集，再从候选集中选择M个节点与data_point相互连接。
             if ((signed)currObj != -1) {
 
                 if (curlevel < maxlevelcopy) {
 
                     dist_t curdist = fstdistfunc_(data_point, getDataByInternalId(currObj), dist_func_param_);
                     for (int level = maxlevelcopy; level > curlevel; level--) {
-
+                        //1. 逐层往下寻找直至curlevel+1，找到最近的一个节点curObj作为q插入到l层的入口点
 
                         bool changed = true;
                         while (changed) {
@@ -1070,7 +1118,7 @@ namespace hnswlib {
                                 if (cand < 0 || cand > max_elements_)
                                     throw std::runtime_error("cand error");
                                 dist_t d = fstdistfunc_(data_point, getDataByInternalId(cand), dist_func_param_);
-                                if (d < curdist) {
+                                if (d < curdist) { //打擂台，找到所有层中距离data_point最近的一个点作为data_point插入level层的入口点。
                                     curdist = d;
                                     currObj = cand;
                                     changed = true;
@@ -1082,6 +1130,7 @@ namespace hnswlib {
 
                 bool epDeleted = isMarkedDeleted(enterpoint_copy);
                 for (int level = std::min(curlevel, maxlevelcopy); level >= 0; level--) {
+                    //2. 从curlevel往下，找一定数量的邻居并连接(每一层找最多ef_construction个点，然后连接)
                     if (level > maxlevelcopy || level < 0)  // possible?
                         throw std::runtime_error("Level error");
 
@@ -1096,7 +1145,7 @@ namespace hnswlib {
                 }
 
 
-            } else {
+            } else {  //如果这是第一个元素，只需将该节点作为HNSW的entrypoint，并将该元素的层数作为当前的最大层。（enterpoint_node_ =0; maxlevel_ = curlevel）
                 // Do nothing for the first element
                 enterpoint_node_ = 0;
                 maxlevel_ = curlevel;

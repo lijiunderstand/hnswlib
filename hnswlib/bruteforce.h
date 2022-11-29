@@ -36,7 +36,7 @@ namespace hnswlib {
         size_t cur_element_count;
         size_t size_per_element_;
 
-        size_t data_size_;
+        size_t data_size_; //float或者是int之类的
         DISTFUNC <dist_t> fstdistfunc_;
         void *dist_func_param_;
         std::mutex index_lock;
@@ -51,21 +51,21 @@ namespace hnswlib {
 
 
 
-                auto search=dict_external_to_internal.find(label);
+                auto search=dict_external_to_internal.find(label); //label是外部的index
                 if (search != dict_external_to_internal.end()) {
-                    idx=search->second;
+                    idx=search->second; //找到了，说明这个datapoint已经在图里面了
                 }
                 else{
                     if (cur_element_count >= maxelements_) {
                         throw std::runtime_error("The number of elements exceeds the specified limit\n");
                     }
-                    idx=cur_element_count;
-                    dict_external_to_internal[label] = idx;
-                    cur_element_count++;
+                    idx=cur_element_count;//内部的index就是idx把他设置为count数（内部的点数）
+                    dict_external_to_internal[label] = idx; //这个查找字典，键是外部的label，值是内部的index,也就是说把内外部index做一个映射
+                    cur_element_count++;//已经建好的图里面的元素数量.
                 }
             }
-            memcpy(data_ + size_per_element_ * idx + data_size_, &label, sizeof(labeltype));
-            memcpy(data_ + size_per_element_ * idx, datapoint, data_size_);
+            memcpy(data_ + size_per_element_ * idx + data_size_, &label, sizeof(labeltype));//完成label的内存搬运
+            memcpy(data_ + size_per_element_ * idx, datapoint, data_size_); //完成data的内存搬运.
 
 
 
@@ -73,9 +73,9 @@ namespace hnswlib {
         };
 
         void removePoint(labeltype cur_external) {
-            size_t cur_c=dict_external_to_internal[cur_external];
+            size_t cur_c=dict_external_to_internal[cur_external]; //cur_external是外部的index, cur_c是内部的index
 
-            dict_external_to_internal.erase(cur_external);
+            dict_external_to_internal.erase(cur_external); //删除内部字典里面的这个键值对.
 
             labeltype label=*((labeltype*)(data_ + size_per_element_ * (cur_element_count-1) + data_size_));
             dict_external_to_internal[label]=cur_c;
@@ -91,20 +91,20 @@ namespace hnswlib {
         searchKnn(const void *query_data, size_t k) const {
             std::priority_queue<std::pair<dist_t, labeltype >> topResults;
             if (cur_element_count == 0) return topResults;
-            for (int i = 0; i < k; i++) {
+            for (int i = 0; i < k; i++) { //这边是先给topResults里面写k个数
                 dist_t dist = fstdistfunc_(query_data, data_ + size_per_element_ * i, dist_func_param_);
                 topResults.push(std::pair<dist_t, labeltype>(dist, *((labeltype *) (data_ + size_per_element_ * i +
                                                                                     data_size_))));
             }
-            dist_t lastdist = topResults.top().first;
+            dist_t lastdist = topResults.top().first; //最小的dist
             for (int i = k; i < cur_element_count; i++) {
                 dist_t dist = fstdistfunc_(query_data, data_ + size_per_element_ * i, dist_func_param_);
-                if (dist <= lastdist) {
+                if (dist <= lastdist) { //如果有更近的，更新topResults里面的内容.
                     topResults.push(std::pair<dist_t, labeltype>(dist, *((labeltype *) (data_ + size_per_element_ * i +
                                                                                         data_size_))));
                     if (topResults.size() > k)
                         topResults.pop();
-                    lastdist = topResults.top().first;
+                    lastdist = topResults.top().first; //优先队列的首元素.最小的dist
                 }
 
             }
