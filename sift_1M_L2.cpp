@@ -292,7 +292,7 @@ void sift_test1M_li()
     char path_gt[1024];
     char *path_q = "/home/intel/workspace/lijie/FML/hnsw/hnswlib/sift1M/sift_query.fvecs";
     char *path_data = "/home/intel/workspace/lijie/FML/hnsw/hnswlib/sift1M/sift_base.fvecs";
-    sprintf(path_index, "sift1M_ef_%d_M_%d.bin", efConstruction, M);
+    sprintf(path_index, "sift1M_ef_%d_M_%d_L2.bin", efConstruction, M);
 
     sprintf(path_gt, "/home/intel/workspace/lijie/FML/hnsw/hnswlib/sift1M/sift_groundtruth.ivecs");
 
@@ -407,6 +407,7 @@ void sift_test1M_li()
             }
             appr_alg->addPoint((void *)(mass), (size_t)j2);
         }
+        appr_alg->checkIntegrity();
         input.close();
         cout << "Build time:" << 1e-6 * stopw_full.getElapsedTimeMicro() << "  seconds\n";
         appr_alg->saveIndex(path_index);
