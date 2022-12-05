@@ -1495,7 +1495,7 @@ namespace hnswlib {
             int thread_num = 8;
             std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates1;
             top_candidates1 = searchLayerL1(currObj,query_data,thread_num);
-            std::cout<<"---------------------top_candidates1.size"<<top_candidates1.size()<<std::endl;
+            // std::cout<<"---------------------top_candidates1.size"<<top_candidates1.size()<<std::endl;
             std::vector<std::pair<dist_t,tableint>> seeds;
             // while(!top_candidates1.empty()){
             //     seeds.emplace_back(top_candidates1.top());
@@ -1525,13 +1525,13 @@ namespace hnswlib {
             for(i=0;i<top_candidates1.size();i++){
                 // tableint pix =seeds[i].second;
                 tableint pix = top_candidates1.top().second;
-                std::cout<<"pix--------------"<<pix<<std::endl;
+                // std::cout<<"pix--------------"<<pix<<std::endl;
                 top_candidates1.pop();
                 VisitedList *vl = visited_list_pool_->getFreeVisitedList();// VisitedList存储已访问过的节点，下面进行其初始化过程
                 vl_type *visited_array = vl->mass; // 新建vl_type实例
                 vl_type visited_array_tag = vl->curV; // visited_array_tag初始化为-1
-std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates;
-std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> candidate_set;
+                std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates;
+                std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> candidate_set;
                 dist_t lowerBound;
                //    num_deleted_统计flag=1的元素数，删除和 被访问不同
                 if (!isMarkedDeleted(pix)) {//currObj没被删时或num_deleted_为0时进入
