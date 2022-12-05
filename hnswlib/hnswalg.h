@@ -96,7 +96,7 @@ namespace hnswlib {
         size_t cur_element_count;
         size_t size_data_per_element_;//第0层节点表中，需要占多少字节=size_links_level0_ +data_size_ +8
         size_t size_links_per_element_;//每个节点对应邻居跳表，在每一层需要占的空间
-        size_t num_deleted_;
+        size_t num_deleted_;//有过删除某向量的次数，PS:不考虑增量情况下，它不会发生影响
 
         size_t M_;
         size_t maxM_;
@@ -162,6 +162,7 @@ namespace hnswlib {
         }
 
         // 算法2：搜索第layer层中离目标最近的ef个邻居
+        //searchBaseLayer在addPoint和updatePoint的时候调用，也就是在建图的时候调用，可以计算各种层，不仅仅是底层
         std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst>
         searchBaseLayer(tableint ep_id, const void *data_point, int layer) {//在某一层search，参数需要直到是哪层，enter_point, data_point是query的向量
             // data_point 目标点
@@ -255,6 +256,99 @@ namespace hnswlib {
             return top_candidates;// 返回结果集W
         }
 
+        std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst>
+        searchLayerL1(tableint ep_id, const void *data_point, int thread_num) const{//在某一层search，参数需要直到是哪层，enter_point, data_point是query的向量
+            // data_point 目标点
+            VisitedList *vl = visited_list_pool_->getFreeVisitedList();// VisitedList存储已访问过的节点，下面进行其初始化过程
+            vl_type *visited_array = vl->mass; // 新建vl_type实例
+            vl_type visited_array_tag = vl->curV; // visited_array_tag初始化为-1
+
+            std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates;//列表W，存储最终的ef个元素// top_candidates 结果集W
+            std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> candidateSet;//列表C，存储候选元素// candidateSet 动态候选集C
+
+            dist_t lowerBound;//存储W中距离Q的最远距离
+            if (!isMarkedDeleted(ep_id)) {// 如果当前节点没有被标记为删除
+                dist_t dist = fstdistfunc_(data_point, getDataByInternalId(ep_id), dist_func_param_);//先从enter_point开始计算，计算dist，然后放入结果中//计算当前节点到目标节点的距离，记为dist
+                top_candidates.emplace(dist, ep_id);// 将当前节点插入结果集W中
+                lowerBound = dist; //更新结果集W中的最远距离为dist, 存储W中距离Q的最远距离， lowerBound =dist -distance(ep_id, q)
+                candidateSet.emplace(-dist, ep_id);
+            } else {// 如果当前节点已经被标记为删除（注意删除的节点不插入结果集W，只插入动态候选集C）
+                lowerBound = std::numeric_limits<dist_t>::max();// 更新结果集W中的最远距离为当前数据类型dist_t的最大值
+                candidateSet.emplace(-lowerBound, ep_id);// 将该节点插入动态候选集C中
+            }
+
+
+            // 对第0层执行算法2，获得结果集W
+            /*
+            visited_array   记录已经遍历过的节点
+            candidateSet    动态候选集，相当于论文中的C
+            top_candidates  结果集，相当于论文中的W
+            */
+            visited_array[ep_id] = visited_array_tag;//这个相当于列表V，存储计算过距离的元素
+
+            while (!candidateSet.empty()) {//如果候选集C不为空，从C中取出距离q最近的元素curNode,// 循环的停止条件是动态候选集C为空，前面已经把enterpoint添加到动态候选集中了
+                std::pair<dist_t, tableint> curr_el_pair = candidateSet.top();//如果distance(currNode, q)>lowerBound那么就返回W，否则获取currNode的所有邻居neighbors// 弹出动态候选集C中当前最近的节点，记为curr_el_pair
+                if ((-curr_el_pair.first) > lowerBound && top_candidates.size() == thread_num) {// 如果当前节点到检索目标的距离大于结果集W中的最大距离，且结果集W的大小|W|已等于ef
+                    break;// 直接结束循环（接下来进入算法的最后阶段，即释放访问列表存储空间，算法结束，返回结果集W）
+                }
+                candidateSet.pop();// 将该节点从动态候选集C中删除
+
+                tableint curNodeNum = curr_el_pair.second;//获取node idx
+
+                // std::unique_lock <std::mutex> lock(link_list_locks_[curNodeNum]);
+
+                int *data;// = (int *)(linkList0_ + curNodeNum * size_links_per_element0_);
+                // data指向的是当前节点的首地址
+
+                data = (int*)get_linklist(curNodeNum, 1);
+
+                size_t size = getListCount((linklistsizeint*)data);//邻居的数量// size为当前节点的邻居数目
+                tableint *datal = (tableint *) (data + 1); //前面是L, 后面是一，取出第一个邻居// +1 即跳转4个字节，刚好跳过header，指向邻居列表
+#ifdef USE_SSE
+                _mm_prefetch((char *) (visited_array + *(data + 1)), _MM_HINT_T0);//SSE使用_mm_prefetch加速计算，可以在实际当前运算与数据从内存到cache的加载并行，从而达到加速的目的
+                _mm_prefetch((char *) (visited_array + *(data + 1) + 64), _MM_HINT_T0);
+                _mm_prefetch(getDataByInternalId(*datal), _MM_HINT_T0);
+                _mm_prefetch(getDataByInternalId(*(datal + 1)), _MM_HINT_T0);
+#endif
+                // 遍历当前节点的邻居列表
+                for (size_t j = 0; j < size; j++) {//遍历所有的邻居
+                    tableint candidate_id = *(datal + j); //由这个得到currObj1(getDataByInternalId)
+//                    if (candidate_id == 0) continue;
+#ifdef USE_SSE
+                    _mm_prefetch((char *) (visited_array + *(datal + j + 1)), _MM_HINT_T0);
+                    _mm_prefetch(getDataByInternalId(*(datal + j + 1)), _MM_HINT_T0);
+#endif
+                    if (visited_array[candidate_id] == visited_array_tag) continue;// 如果该邻居已经被遍历过，就跳过该邻居
+                    visited_array[candidate_id] = visited_array_tag;//标记为visited,加入列表V // 如果该邻居没有被遍历过，就标记该邻居为已遍历
+                    char *currObj1 = (getDataByInternalId(candidate_id));
+
+                    dist_t dist1 = fstdistfunc_(data_point, currObj1, dist_func_param_);//计算邻居和query的距离// 计算该邻居到目标的距离，记为dist1
+                    // 如果结果集W的大小|W|小于ef，或者该点距离dist1小于W中的最大值lowerBound
+                    if (top_candidates.size() < thread_num || lowerBound > dist1) {//dist1<W中距离q的最远距离或者W.size<ef, neighbors[i]加入列表C, W
+                        candidateSet.emplace(-dist1, candidate_id); // 将该节点插入动态候选集C
+#ifdef USE_SSE
+                        _mm_prefetch(getDataByInternalId(candidateSet.top().second), _MM_HINT_T0);
+#endif
+
+                        if (!isMarkedDeleted(candidate_id))// 如果该节点没有被标记为删除
+                            top_candidates.emplace(dist1, candidate_id); // 就将其插入结果集W
+                        // 如果结果集W大小超过ef
+                        if (top_candidates.size() > thread_num)//W.size>ef,取出W中距离q最远的元素
+                            top_candidates.pop();// 就把结果集W中距离最大的节点删除
+                        // 如果结果集W不为空 
+                        if (!top_candidates.empty())
+                            lowerBound = top_candidates.top().first;//更新loweBound=W中距离q最远的元素// 更新当前结果集W中离目标最远的距离
+                    }
+                }
+            }
+            visited_list_pool_->releaseVisitedList(vl);// 释放存储空间
+
+            return top_candidates;// 返回结果集W
+        }
+
+
+
+
         mutable std::atomic<long> metric_distance_computations;
         mutable std::atomic<long> metric_hops;//可以使用任意的类型作为模板参数。在多线程中如果使用了原子变量，
                                               //其本身就保证了数据访问的互斥性，所以不需要使用互斥量来保护该变量了
@@ -262,6 +356,8 @@ namespace hnswlib {
         //维护一个长度不大于ef_construction的动态list，记为W。每次从动态list中取最近的点，遍历它的邻居节点，
         //如果它的邻居没有被遍历过visited，那么当结果集小于ef_construction，或者该节点比结果集中最远的点离目标近时，则把它添加到W中，
         //如果该点没有被标记为删除，则添加到结果集。如果添加后结果集数量多于ef_construction，则把最远的pop出来 
+
+        //searchBaseLayerST只计算底层，searchBaseLayer可以计算各种层，包括底层，searchBaseLayerST是搜索的时候调用，只计算底层
         template <bool has_deletions, bool collect_metrics=false>
         std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst>
         searchBaseLayerST(tableint ep_id, const void *data_point, size_t ef) const {//只计算底层，传入的参数是ef
@@ -283,6 +379,7 @@ namespace hnswlib {
                 lowerBound = std::numeric_limits<dist_t>::max();
                 candidate_set.emplace(-lowerBound, ep_id);//倒序排列
             }
+            //这个时候candidate_set和top_candidates只有一个值
 
             visited_array[ep_id] = visited_array_tag;//存为1，表示已被访问
 
@@ -350,6 +447,98 @@ namespace hnswlib {
             visited_list_pool_->releaseVisitedList(vl);
             return top_candidates;//返回动态列表，也就是返回layer层中距离q最近的ef个邻居
         }
+
+//         //searchBaseLayerST只计算底层，searchBaseLayer可以计算各种层，包括底层，searchBaseLayerST是搜索的时候调用，只计算底层
+//         template <bool has_deletions, bool collect_metrics=false>
+//         std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst>
+//         parallelsearchBaseLayerST(tableint ep_id, const void *data_point, size_t ef, size_t thread_num) const {//只计算底层，传入的参数是ef
+//             VisitedList *vl = visited_list_pool_->getFreeVisitedList();
+//             vl_type *visited_array = vl->mass;
+//             vl_type visited_array_tag = vl->curV;//当前值为-1
+
+//             std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates;//W 顶部是距离最大的元素，用于删和返回
+//             std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> candidate_set;//C 顶部最小，用于提取元素
+
+//             dist_t lowerBound;
+//             //num_deleted_统计flag=1的元素数，删除和 被访问不同
+//             if (!has_deletions || !isMarkedDeleted(ep_id)) {//currObj没被删时或num_deleted_为0时进入
+//                 dist_t dist = fstdistfunc_(data_point, getDataByInternalId(ep_id), dist_func_param_);//q和data的距离
+//                 lowerBound = dist;
+//                 top_candidates.emplace(dist, ep_id);
+//                 candidate_set.emplace(-dist, ep_id);
+//             } else {
+//                 lowerBound = std::numeric_limits<dist_t>::max();
+//                 candidate_set.emplace(-lowerBound, ep_id);//倒序排列
+//             }
+//             //这个时候candidate_set和top_candidates只有一个值
+
+//             visited_array[ep_id] = visited_array_tag;//存为1，表示已被访问
+
+//             while (!candidate_set.empty()) {
+
+//                 std::pair<dist_t, tableint> current_node_pair = candidate_set.top();
+
+//                 if ((-current_node_pair.first) > lowerBound && (top_candidates.size() == ef || has_deletions == false)) {
+//                     break;
+//                 }
+//                 candidate_set.pop();
+
+//                 tableint current_node_id = current_node_pair.second;
+//                 int *data = (int *) get_linklist0(current_node_id);
+//                 size_t size = getListCount((linklistsizeint*)data);
+// //                bool cur_node_deleted = isMarkedDeleted(current_node_id);
+//                 if(collect_metrics){
+//                     metric_hops++;
+//                     metric_distance_computations+=size;
+//                 }
+
+// #ifdef USE_SSE
+//                 _mm_prefetch((char *) (visited_array + *(data + 1)), _MM_HINT_T0);
+//                 _mm_prefetch((char *) (visited_array + *(data + 1) + 64), _MM_HINT_T0);
+//                 _mm_prefetch(data_level0_memory_ + (*(data + 1)) * size_data_per_element_ + offsetData_, _MM_HINT_T0);
+//                 _mm_prefetch((char *) (data + 2), _MM_HINT_T0);
+// #endif
+
+//                 for (size_t j = 1; j <= size; j++) {
+//                     int candidate_id = *(data + j);
+// //                    if (candidate_id == 0) continue;
+// #ifdef USE_SSE
+//                     _mm_prefetch((char *) (visited_array + *(data + j + 1)), _MM_HINT_T0);
+//                     _mm_prefetch(data_level0_memory_ + (*(data + j + 1)) * size_data_per_element_ + offsetData_,
+//                                  _MM_HINT_T0);////////////
+// #endif
+//                     if (!(visited_array[candidate_id] == visited_array_tag)) {
+
+//                         visited_array[candidate_id] = visited_array_tag;
+
+//                         char *currObj1 = (getDataByInternalId(candidate_id));
+//                         dist_t dist = fstdistfunc_(data_point, currObj1, dist_func_param_);
+
+//                         if (top_candidates.size() < ef || lowerBound > dist) {
+//                             candidate_set.emplace(-dist, candidate_id);
+// #ifdef USE_SSE
+//                             _mm_prefetch(data_level0_memory_ + candidate_set.top().second * size_data_per_element_ +
+//                                          offsetLevel0_,///////////
+//                                          _MM_HINT_T0);////////////////////////
+// #endif
+
+//                             if (!has_deletions || !isMarkedDeleted(candidate_id))
+//                                 top_candidates.emplace(dist, candidate_id);
+
+//                             if (top_candidates.size() > ef)
+//                                 top_candidates.pop();
+
+//                             if (!top_candidates.empty())
+//                                 lowerBound = top_candidates.top().first;
+//                         }
+//                     }
+//                 }
+//             }
+
+//             visited_list_pool_->releaseVisitedList(vl);
+//             return top_candidates;//返回动态列表，也就是返回layer层中距离q最近的ef个邻居
+//         }
+
        //算法4 启发式方法选择邻居，从top-candidates中选择距离q最近的M个元素
         void getNeighborsByHeuristic2(
                 std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> &top_candidates,
@@ -1196,7 +1385,72 @@ namespace hnswlib {
             }
             return cur_c;
         };
+//    #if 0
+//         std::priority_queue<std::pair<dist_t, labeltype >>
+//         searchKnn(const void *query_data, size_t k) const {
+//             std::priority_queue<std::pair<dist_t, labeltype >> result;
+//             if (cur_element_count == 0) return result;
+//             //currobj和curdist分别记录距离data point最近的点和距离
+//             tableint currObj = enterpoint_node_;
+//             dist_t curdist = fstdistfunc_(query_data, getDataByInternalId(enterpoint_node_), dist_func_param_);
+//             //在层L...1之间
+//             for (int level = maxlevel_; level > 0; level--) {
+//                 bool changed = true;
+//                 while (changed) {
+//                     //首先没有变化，表示在同一层中搜索
+//                     changed = false;
+//                     unsigned int *data;
+//                     //获得currObj的连接数，也就是邻居
+//                     data = (unsigned int *) get_linklist(currObj, level);
+//                     int size = getListCount(data);
+//                     metric_hops++;
+//                     metric_distance_computations+=size;
 
+//                     tableint *datal = (tableint *) (data + 1);//指向了data第一个邻居的id, datal表示当前元素第一个邻居的label
+//                     //对于currObj的每一个邻居，计算它与query_data的距离，并及时更新currObj和currdist
+//                     for (int i = 0; i < size; i++) {
+//                         //获取邻居id
+//                         tableint cand = datal[i];
+//                         if (cand < 0 || cand > max_elements_)
+//                             throw std::runtime_error("cand error");
+//                         //根据id获取邻居并计算其到query的距离
+//                         dist_t d = fstdistfunc_(query_data, getDataByInternalId(cand), dist_func_param_);
+//                         //如果这个邻居与query的距离比curdist还要小，更新curdist为这个邻居，changed改为true
+//                         if (d < curdist) {
+//                             curdist = d;
+//                             currObj = cand;
+//                             changed = true;
+//                         }
+//                     }
+//                 }
+//             }
+//             //目前已经获得第一层与query最近的元素currObj
+//             //在第0层获取currObj邻居中距离query最近的max(ef_, k)个邻居，也就是动态列表top_candidates，论文中是W
+//             std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates;
+//             if (num_deleted_) {
+//                 top_candidates=searchBaseLayerST<true,true>(// has_deletions:true, collect_metrics: true
+//                         currObj, query_data, std::max(ef_, k));
+//             }
+//             else{
+//                 top_candidates=searchBaseLayerST<false,true>(// has_deletions:false, collect_metrics: true
+//                         currObj, query_data, std::max(ef_, k));
+//             }
+//             //top_candidates修剪为k个
+//             while (top_candidates.size() > k) {
+//                 top_candidates.pop();
+//             }
+//             //结果存到result中
+//             while (top_candidates.size() > 0) {
+//                 std::pair<dist_t, tableint> rez = top_candidates.top();
+//                 result.push(std::pair<dist_t, labeltype>(rez.first, getExternalLabel(rez.second)));
+//                 top_candidates.pop();
+//             }
+//             return result;
+//         };
+
+//     #endif
+        //multi-search
+        // #if 1
         std::priority_queue<std::pair<dist_t, labeltype >>
         searchKnn(const void *query_data, size_t k) const {
             std::priority_queue<std::pair<dist_t, labeltype >> result;
@@ -1205,7 +1459,7 @@ namespace hnswlib {
             tableint currObj = enterpoint_node_;
             dist_t curdist = fstdistfunc_(query_data, getDataByInternalId(enterpoint_node_), dist_func_param_);
             //在层L...1之间
-            for (int level = maxlevel_; level > 0; level--) {
+            for (int level = maxlevel_; level > 1; level--) {
                 bool changed = true;
                 while (changed) {
                     //首先没有变化，表示在同一层中搜索
@@ -1235,29 +1489,210 @@ namespace hnswlib {
                     }
                 }
             }
-            //目前已经获得第一层与query最近的元素currObj
-            //在第0层获取currObj邻居中距离query最近的max(ef_, k)个邻居，也就是动态列表top_candidates，论文中是W
-            std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates;
-            if (num_deleted_) {
-                top_candidates=searchBaseLayerST<true,true>(// has_deletions:true, collect_metrics: true
-                        currObj, query_data, std::max(ef_, k));
+            // how to expand parallel search
+            //method 1: m thread=cores in the beginning, so you need to find m enter_point in layer 1 for base layer
+            // below is how to find m enter_point in layer 1, can not use searchBaseLayerST,for it only search in baseLayer, can not use searhBaseLayer, it will serach ef_construction points.
+            int thread_num = 8;
+            std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates1;
+            top_candidates1 = searchLayerL1(currObj,query_data,thread_num);
+            std::cout<<"---------------------top_candidates1.size"<<top_candidates1.size()<<std::endl;
+            std::vector<std::pair<dist_t,tableint>> seeds;
+            // while(!top_candidates1.empty()){
+            //     seeds.emplace_back(top_candidates1.top());
+            //     top_candidates1.pop();
+            // }
+
+            // std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates;
+            // std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> candidate_set;
+
+            std::vector<std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst>> top_candidates_vector;
+            std::vector<std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst>> candidate_set_vector;
+
+
+            // while(!top_candidates1.empty()){
+            //     tableint ep_id = top_candidates1.top().second;
+            //     top_candidates1.pop();
+            //     // std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates2 = searchBaseLayerST<false>(ep_id, query_data, ef_);
+            //     std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates2 = parallelsearchBaseLayerST<false>(ep_id, query_data, ef_,thread_num);
+            //     while(!top_candidates2.empty()){
+            //         top_candidates.push(top_candidates2.top());
+            //         top_candidates2.pop();
+            //     }
+            // }
+            int i;
+            // #pragma omp parallel for private(i)
+            // for(i=0;i<seeds.size();i++){
+            for(i=0;i<top_candidates1.size();i++){
+                // tableint pix =seeds[i].second;
+                tableint pix = top_candidates1.top().second;
+                std::cout<<"pix--------------"<<pix<<std::endl;
+                top_candidates1.pop();
+                VisitedList *vl = visited_list_pool_->getFreeVisitedList();// VisitedList存储已访问过的节点，下面进行其初始化过程
+                vl_type *visited_array = vl->mass; // 新建vl_type实例
+                vl_type visited_array_tag = vl->curV; // visited_array_tag初始化为-1
+std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates;
+std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> candidate_set;
+                dist_t lowerBound;
+               //    num_deleted_统计flag=1的元素数，删除和 被访问不同
+                if (!isMarkedDeleted(pix)) {//currObj没被删时或num_deleted_为0时进入
+                    dist_t dist = fstdistfunc_(query_data, getDataByInternalId(pix), dist_func_param_);//q和data的距离
+                    lowerBound = dist;
+                    // top_candidates_vector[i].emplace(dist, pix);
+                    // candidate_set_vector[i].emplace(-dist, pix);
+                    top_candidates.emplace(dist, pix);
+                    candidate_set.emplace(-dist, pix);
+                } else {
+                    lowerBound = std::numeric_limits<dist_t>::max();
+                    // candidate_set_vector[i].emplace(-lowerBound, pix);//倒序排列
+                    candidate_set.emplace(-lowerBound, pix);
+                }
+                visited_array[pix] = visited_array_tag;
+                
+                // //这个时候candidate_set和top_candidates只有一个值
+
+                // // visited_array[pix] = visited_array_tag;//存为1，表示已被访问   
+                // if(visited_array[pix]==visited_array_tag || pix==-1)
+                //     continue;
+                // visited_array[pix] = visited_array_tag;
+                // dist_t dist = fstdistfunc_(data_point, getDataByInternalId(pix), dist_func_param_);
+
+                // while (!candidate_set_vector[i].empty()) {
+                while(!candidate_set.empty()){
+
+                // std::pair<dist_t, tableint> current_node_pair = candidate_set_vector[i].top();
+                std::pair<dist_t, tableint> current_node_pair = candidate_set.top();
+                if ((-current_node_pair.first) > lowerBound && (top_candidates.size() == ef_)) {
+                // if ((-current_node_pair.first) > lowerBound && (top_candidates_vector[i].size() == ef_)) { //每个local_thread搜索的长度现在设置的也是ef_
+                    break;
+                }
+                // candidate_set_vector[i].pop();
+                candidate_set.pop();
+
+                tableint current_node_id = current_node_pair.second;
+                int *data = (int *) get_linklist0(current_node_id);
+                size_t size = getListCount((linklistsizeint*)data);
+                // std::cout<<"size:"<<size<<std::endl;
+//                bool cur_node_deleted = isMarkedDeleted(current_node_id);
+
+
+#ifdef USE_SSE
+                _mm_prefetch((char *) (visited_array + *(data + 1)), _MM_HINT_T0);
+                _mm_prefetch((char *) (visited_array + *(data + 1) + 64), _MM_HINT_T0);
+                _mm_prefetch(data_level0_memory_ + (*(data + 1)) * size_data_per_element_ + offsetData_, _MM_HINT_T0);
+                _mm_prefetch((char *) (data + 2), _MM_HINT_T0);
+#endif
+
+                for (size_t j = 1; j <= size; j++) {
+                    int candidate_id = *(data + j);
+                    // std::cout<<"candidate_id:"<<candidate_id<<std::endl;
+//                    if (candidate_id == 0) continue;
+#ifdef USE_SSE
+                    _mm_prefetch((char *) (visited_array + *(data + j + 1)), _MM_HINT_T0);
+                    _mm_prefetch(data_level0_memory_ + (*(data + j + 1)) * size_data_per_element_ + offsetData_,
+                                 _MM_HINT_T0);////////////
+#endif
+                    if (!(visited_array[candidate_id] == visited_array_tag)) {
+
+                        visited_array[candidate_id] = visited_array_tag;
+
+                        char *currObj1 = (getDataByInternalId(candidate_id));
+                        dist_t dist = fstdistfunc_(query_data, currObj1, dist_func_param_);
+                        // std::cout<<"dist:::::"<<dist<<std::endl;
+
+                        // if (top_candidates_vector[i].size() < ef_ || lowerBound > dist) {
+                        //     candidate_set_vector[i].emplace(-dist, candidate_id);
+                        if (top_candidates.size() < ef_ || lowerBound > dist) {
+                            candidate_set.emplace(-dist, candidate_id);
+#ifdef USE_SSE
+                            // _mm_prefetch(data_level0_memory_ + candidate_set_vector[i].top().second * size_data_per_element_ +
+                            //              offsetLevel0_,///////////
+                            //              _MM_HINT_T0);////////////////////////
+                            _mm_prefetch(data_level0_memory_ + candidate_set.top().second * size_data_per_element_ +
+                                            offsetLevel0_,///////////
+                                            _MM_HINT_T0);////////////////////////
+#endif
+
+                            // if ( !isMarkedDeleted(candidate_id))
+                            //     top_candidates_vector[i].emplace(dist, candidate_id);
+
+                            // if (top_candidates_vector[i].size() > ef_)
+                            //     top_candidates_vector[i].pop();
+
+                            // if (!top_candidates_vector[i].empty())
+                            //     lowerBound = top_candidates_vector[i].top().first;
+
+
+                            if ( !isMarkedDeleted(candidate_id))
+                                top_candidates.emplace(dist, candidate_id);
+
+                            if (top_candidates.size() > ef_)
+                                top_candidates.pop();
+
+                            if (!top_candidates.empty())
+                                lowerBound = top_candidates.top().first;
+                            
+                        }
+                    }
+                }
             }
-            else{
-                top_candidates=searchBaseLayerST<false,true>(// has_deletions:false, collect_metrics: true
-                        currObj, query_data, std::max(ef_, k));
+
+            visited_list_pool_->releaseVisitedList(vl);
+
+
+        top_candidates_vector.emplace_back(top_candidates);
+        candidate_set_vector.emplace_back(candidate_set);
+       
+
+        }
+        //接下来这边需要的是合并各个thread的结果,合并结果并截取k个
+
+        std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates;
+        // std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> candidate_set;
+
+       /*  //不好使
+        std::unordered_set<std::pair<dist_t, tableint>> top_candidates_set;//利用set去重
+        //合并thread的结果，存到top_candidates里面
+        
+        for(int i=0;i<top_candidates_vector.size();i++){
+            // candidate_set.push_back(top_candidates_vector[i]);
+            while(!top_candidates_vector[i].empty()){
+                top_candidates_set.insert(top_candidates_vector[i].top());
+                top_candidates_vector[i].pop();
             }
-            //top_candidates修剪为k个
-            while (top_candidates.size() > k) {
-                top_candidates.pop();
+        }
+
+        for(auto i:top_candidates_set){
+            top_candidates.emplace_back(i);
+        }
+
+        */
+       std::unordered_set<tableint> temp_set;
+       for(int i=0;i<top_candidates_vector.size();i++){
+        while(!top_candidates_vector[i].empty()){
+            tableint temp = top_candidates_vector[i].top().second;
+            // std::cout<<"temp"<<temp<<std::endl;
+            temp_set.emplace(temp);
+            if(temp_set.find(temp)!=temp_set.end()){
+                top_candidates.emplace(top_candidates_vector[i].top());
+                top_candidates_vector[i].pop();
             }
-            //结果存到result中
-            while (top_candidates.size() > 0) {
-                std::pair<dist_t, tableint> rez = top_candidates.top();
-                result.push(std::pair<dist_t, labeltype>(rez.first, getExternalLabel(rez.second)));
-                top_candidates.pop();
-            }
-            return result;
+        }
+       }
+
+        //top_candidates修剪为k个
+        while (top_candidates.size() > k) {
+            top_candidates.pop();
+        }
+        //结果存到result中
+        while (top_candidates.size() > 0) {
+            std::pair<dist_t, tableint> rez = top_candidates.top();
+            result.push(std::pair<dist_t, labeltype>(rez.first, getExternalLabel(rez.second)));
+            top_candidates.pop();
+        }
+        return result;
         };
+
+        // #endif
 
         void checkIntegrity(){
             int connections_checked=0;

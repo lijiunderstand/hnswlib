@@ -4,7 +4,7 @@ project(hnsw_lib
 
 add_library(hnswlib INTERFACE)
 target_include_directories(hnswlib INTERFACE .) 
-
+set(CMAKE_BUILD_TYPE Debug)
 if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
     set(CMAKE_CXX_STANDARD 11)
 
