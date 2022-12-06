@@ -9,6 +9,7 @@
 #include <unordered_set>
 #include <list>
 #include <iostream>
+#include <omp.h>
 
 namespace hnswlib {
     typedef unsigned int tableint; //四个字节，一个tableint存储一个邻居节点的id
@@ -1505,9 +1506,11 @@ namespace hnswlib {
             // std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates;
             // std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> candidate_set;
 
-            std::vector<std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst>> top_candidates_vector;
-            std::vector<std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst>> candidate_set_vector;
+            // std::vector<std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst>> top_candidates_vector;
+            // std::vector<std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst>> candidate_set_vector;
 
+           std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates_vector[thread_num];
+           std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> candidate_set_vector[thread_num];
 
             // while(!top_candidates1.empty()){
             //     tableint ep_id = top_candidates1.top().second;
@@ -1519,10 +1522,12 @@ namespace hnswlib {
             //         top_candidates2.pop();
             //     }
             // }
-            int i;
+            // int i;
             // #pragma omp parallel for private(i)
+            omp_set_num_threads(thread_num);
+            #pragma omp parallel for
             // for(i=0;i<seeds.size();i++){
-            for(i=0;i<top_candidates1.size();i++){
+            for(int i=0;i<top_candidates1.size();i++){
                 // tableint pix =seeds[i].second;
                 tableint pix = top_candidates1.top().second;
                 // std::cout<<"pix--------------"<<pix<<std::endl;
@@ -1530,21 +1535,22 @@ namespace hnswlib {
                 VisitedList *vl = visited_list_pool_->getFreeVisitedList();// VisitedList存储已访问过的节点，下面进行其初始化过程
                 vl_type *visited_array = vl->mass; // 新建vl_type实例
                 vl_type visited_array_tag = vl->curV; // visited_array_tag初始化为-1
-                std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates;
-                std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> candidate_set;
+                // std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates;
+                // std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> candidate_set;
                 dist_t lowerBound;
                //    num_deleted_统计flag=1的元素数，删除和 被访问不同
                 if (!isMarkedDeleted(pix)) {//currObj没被删时或num_deleted_为0时进入
                     dist_t dist = fstdistfunc_(query_data, getDataByInternalId(pix), dist_func_param_);//q和data的距离
                     lowerBound = dist;
-                    // top_candidates_vector[i].emplace(dist, pix);
-                    // candidate_set_vector[i].emplace(-dist, pix);
-                    top_candidates.emplace(dist, pix);
-                    candidate_set.emplace(-dist, pix);
+                    // std::cout<<"dist:"<<dist<<"pix: "<<pix<<std::endl;
+                    top_candidates_vector[i].emplace(dist, pix);
+                    candidate_set_vector[i].emplace(-dist, pix);
+                    // top_candidates.emplace(dist, pix);
+                    // candidate_set.emplace(-dist, pix);
                 } else {
                     lowerBound = std::numeric_limits<dist_t>::max();
-                    // candidate_set_vector[i].emplace(-lowerBound, pix);//倒序排列
-                    candidate_set.emplace(-lowerBound, pix);
+                    candidate_set_vector[i].emplace(-lowerBound, pix);//倒序排列
+                    // candidate_set.emplace(-lowerBound, pix);
                 }
                 visited_array[pix] = visited_array_tag;
                 
@@ -1555,18 +1561,21 @@ namespace hnswlib {
                 //     continue;
                 // visited_array[pix] = visited_array_tag;
                 // dist_t dist = fstdistfunc_(data_point, getDataByInternalId(pix), dist_func_param_);
+                int step=0;
+                while (!candidate_set_vector[i].empty()) {
+                // while(!candidate_set.empty()){
 
-                // while (!candidate_set_vector[i].empty()) {
-                while(!candidate_set.empty()){
+                size_t ef_staged =0;
+                ef_staged == ef_ ?ef_: step++;
 
-                // std::pair<dist_t, tableint> current_node_pair = candidate_set_vector[i].top();
-                std::pair<dist_t, tableint> current_node_pair = candidate_set.top();
-                if ((-current_node_pair.first) > lowerBound && (top_candidates.size() == ef_)) {
-                // if ((-current_node_pair.first) > lowerBound && (top_candidates_vector[i].size() == ef_)) { //每个local_thread搜索的长度现在设置的也是ef_
+                std::pair<dist_t, tableint> current_node_pair = candidate_set_vector[i].top();
+                // std::pair<dist_t, tableint> current_node_pair = candidate_set.top();
+                // if ((-current_node_pair.first) > lowerBound && (top_candidates.size() == ef_)) {
+                if ((-current_node_pair.first) > lowerBound && (top_candidates_vector[i].size() == ef_)) { //每个local_thread搜索的长度现在设置的也是ef_
                     break;
                 }
-                // candidate_set_vector[i].pop();
-                candidate_set.pop();
+                candidate_set_vector[i].pop();
+                // candidate_set.pop();
 
                 tableint current_node_id = current_node_pair.second;
                 int *data = (int *) get_linklist0(current_node_id);
@@ -1599,38 +1608,39 @@ namespace hnswlib {
                         dist_t dist = fstdistfunc_(query_data, currObj1, dist_func_param_);
                         // std::cout<<"dist:::::"<<dist<<std::endl;
 
-                        // if (top_candidates_vector[i].size() < ef_ || lowerBound > dist) {
-                        //     candidate_set_vector[i].emplace(-dist, candidate_id);
-                        if (top_candidates.size() < ef_ || lowerBound > dist) {
-                            candidate_set.emplace(-dist, candidate_id);
+                        if (top_candidates_vector[i].size() < ef_ || lowerBound > dist) {
+                            candidate_set_vector[i].emplace(-dist, candidate_id);
+                        // if (top_candidates.size() < ef_ || lowerBound > dist) {
+                        //     candidate_set.emplace(-dist, candidate_id);
 #ifdef USE_SSE
-                            // _mm_prefetch(data_level0_memory_ + candidate_set_vector[i].top().second * size_data_per_element_ +
-                            //              offsetLevel0_,///////////
-                            //              _MM_HINT_T0);////////////////////////
-                            _mm_prefetch(data_level0_memory_ + candidate_set.top().second * size_data_per_element_ +
-                                            offsetLevel0_,///////////
-                                            _MM_HINT_T0);////////////////////////
+                            _mm_prefetch(data_level0_memory_ + candidate_set_vector[i].top().second * size_data_per_element_ +
+                                         offsetLevel0_,///////////
+                                         _MM_HINT_T0);////////////////////////
+                            // _mm_prefetch(data_level0_memory_ + candidate_set.top().second * size_data_per_element_ +
+                            //                 offsetLevel0_,///////////
+                            //                 _MM_HINT_T0);////////////////////////
 #endif
 
-                            // if ( !isMarkedDeleted(candidate_id))
-                            //     top_candidates_vector[i].emplace(dist, candidate_id);
-
-                            // if (top_candidates_vector[i].size() > ef_)
-                            //     top_candidates_vector[i].pop();
-
-                            // if (!top_candidates_vector[i].empty())
-                            //     lowerBound = top_candidates_vector[i].top().first;
-
-
                             if ( !isMarkedDeleted(candidate_id))
-                                top_candidates.emplace(dist, candidate_id);
+                                top_candidates_vector[i].emplace(dist, candidate_id);
 
-                            if (top_candidates.size() > ef_)
-                                top_candidates.pop();
+                            if (top_candidates_vector[i].size() > ef_)
+                                top_candidates_vector[i].pop();
 
-                            if (!top_candidates.empty())
-                                lowerBound = top_candidates.top().first;
-                            
+                            if (!top_candidates_vector[i].empty())
+                                lowerBound = top_candidates_vector[i].top().first;
+
+
+                            // if ( !isMarkedDeleted(candidate_id))
+                            //     top_candidates.emplace(dist, candidate_id);
+
+                            // if (top_candidates.size() > ef_)
+                            //     top_candidates.pop();
+
+                            // if (!top_candidates.empty())
+                            //     lowerBound = top_candidates.top().first;
+
+                            // std::cout<<"end----"<<std::endl;
                         }
                     }
                 }
@@ -1639,11 +1649,17 @@ namespace hnswlib {
             visited_list_pool_->releaseVisitedList(vl);
 
 
-        top_candidates_vector.emplace_back(top_candidates);
-        candidate_set_vector.emplace_back(candidate_set);
+        // top_candidates_vector.emplace_back(top_candidates);
+        // candidate_set_vector.emplace_back(candidate_set);
+
+        // top_candidates_vector.emplace_back(top_candidates_vector[i]);
+        // candidate_set_vector.emplace_back(candidate_set_vector[i]);
        
 
         }
+        
+
+#pragma omp barrier
         //接下来这边需要的是合并各个thread的结果,合并结果并截取k个
 
         std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates;
@@ -1666,19 +1682,48 @@ namespace hnswlib {
         }
 
         */
-       std::unordered_set<tableint> temp_set;
-       for(int i=0;i<top_candidates_vector.size();i++){
-        while(!top_candidates_vector[i].empty()){
-            tableint temp = top_candidates_vector[i].top().second;
+    //    std::vector<tableint> temp_set;
+       tableint temp_set[1000000];
+       memset(temp_set, 0, sizeof(tableint));
+    //    for(int i=0;i<top_candidates_vector.size();i++){
+        for(int i=0;i<thread_num;i++){
+        // std::cout<<"top_candidates_vector[i].size()"<<top_candidates_vector[i].size()<<std::endl;
+        while(top_candidates_vector[i].size()){
+            // for(int j=0;j<top_candidates_vector[i].size();j++){
+                tableint temp = top_candidates_vector[i].top().second;
             // std::cout<<"temp"<<temp<<std::endl;
-            temp_set.emplace(temp);
-            if(temp_set.find(temp)!=temp_set.end()){
+            // if(temp_set.find(temp)==temp_set.end()){
+            //     temp_set.insert({temp,1});
+            // }
+            // else{
+            //     temp_set[temp]
+
+            // }
+            // temp_set.emplace_back(temp);
+            temp_set[temp]++;
+            // std::cout<<"temp_set[temp]: "<<temp_set[temp]<<std::endl;
+            // printf("temp_set[temp]:%d.\n", temp_set[temp]);
+            // if(temp_set.find(temp)!=temp_set.end()){
+            //这块的去重的不太合理呀，但是结果是好的
+            if(temp_set[temp]>1){
                 top_candidates.emplace(top_candidates_vector[i].top());
                 top_candidates_vector[i].pop();
             }
-        }
-       }
+            else if(temp_set[temp]==1){
+                top_candidates_vector[i].pop();
+            }
 
+        }
+        // std::cout<<"debug  top_candidates size:"<<top_candidates.size()<<std::endl;
+        // while(!top_candidates_vector[i].empty()){
+        //        if(temp_set[temp]!=1){
+        //         top_candidates.emplace(top_candidates_vector[i].top());
+        //         // std::cout<<"top_candidates_vector[i]"<<top_candidates_vector[i].top().second<<std::endl;
+        //         top_candidates_vector[i].pop();
+        //     }
+        // }
+       }
+    //    std::cout<<"debug"<<std::endl;
         //top_candidates修剪为k个
         while (top_candidates.size() > k) {
             top_candidates.pop();
